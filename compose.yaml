@@ -1,0 +1,17 @@
+name: wedding-tasks
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.local
+    ports:
+      - "127.0.0.1:3100:3000"
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

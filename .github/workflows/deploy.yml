@@ -1,0 +1,60 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wedding-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build production image
+        run: docker build --tag "wedding-tasks:$GITHUB_SHA" .
+
+      - name: Transfer image and deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SSH_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { echo 'Configure SSH_HOST'; exit 1; }
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo 'Configure SSH_USER'; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || { echo 'Configure SSH_PORT'; exit 1; }
+          [[ -n "$SSH_PRIVATE_KEY" && -n "$SSH_KNOWN_HOSTS" ]] || { echo 'Configure SSH key and known hosts'; exit 1; }
+
+          ssh_dir="$RUNNER_TEMP/wedding-ssh"
+          install -d -m 700 "$ssh_dir"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/key" "$ssh_dir/known_hosts"
+          unset SSH_PRIVATE_KEY SSH_KNOWN_HOSTS
+          ssh_options=(-i "$ssh_dir/key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$ssh_dir/known_hosts" -o ConnectTimeout=15)
+          target="$SSH_USER@$SSH_HOST"
+
+          ssh "${ssh_options[@]}" "$target" 'test -d /srv/wedding-tasks && test -s /srv/wedding-tasks/.env.local && docker info >/dev/null && { test "$(uname -m)" = x86_64 || { echo "This workflow requires an x86_64 VPS"; exit 1; }; }'
+
+          # Токен Диска остаётся на сервере; удаление файлов rsync не включено.
+          export RSYNC_RSH="ssh -i $ssh_dir/key -p $SSH_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o ConnectTimeout=15"
+          rsync -az --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='.vercel' --include='.env.example' --exclude='.env*' --exclude='.deployed-image' --exclude='*.tsbuildinfo' ./ "$target:/srv/wedding-tasks/"
+
+          docker save "wedding-tasks:$GITHUB_SHA" | gzip | ssh "${ssh_options[@]}" "$target" 'bash -o pipefail -c "gzip -d | docker load"'
+          ssh "${ssh_options[@]}" "$target" "bash /srv/wedding-tasks/deploy/deploy.sh $GITHUB_SHA"

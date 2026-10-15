@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.vercel
+.env*
+*.tsbuildinfo
+.DS_Store
+tests
+test-results
+.deployed-image
+wedding-deploy-key*
